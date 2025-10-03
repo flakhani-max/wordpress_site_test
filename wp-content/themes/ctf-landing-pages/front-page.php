@@ -29,7 +29,7 @@
 	<?php wp_body_open(); ?>
 	<div class="container">
 		<div class="hero">
-			<h1>CTF Local WordPress</h1>
+			<h1>CTF hello world</h1>
 			<p>Basic main page for testing the local environment.</p>
 		</div>
 		<div class="grid">

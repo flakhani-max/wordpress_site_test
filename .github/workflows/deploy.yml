@@ -31,9 +31,9 @@ jobs:
 
       # ---------- ARTIFACT REGISTRY ----------
       - name: Ensure Artifact Registry repo exists
+        shell: bash
         env:
           REGION: ${{ secrets.REGION }}
-        shell: bash
         run: |
           set -euo pipefail
           if ! gcloud artifacts repositories describe "$AR_REPO" --location="$REGION" >/dev/null 2>&1; then
@@ -50,10 +50,10 @@ jobs:
 
       # ---------- BUILD & PUSH ----------
       - name: Build & Push Docker image
+        shell: bash
         env:
           REGION: ${{ secrets.REGION }}
           GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-        shell: bash
         run: |
           set -euo pipefail
           IMAGE_URI="$REGION-docker.pkg.dev/$GCP_PROJECT_ID/$AR_REPO/$IMAGE_NAME:$(date +%Y%m%d-%H%M%S)-${{ github.sha }}"
@@ -62,7 +62,7 @@ jobs:
           docker push "$IMAGE_URI"
 
       # ---------- DEPLOY ----------
-      - name: Deploy to Cloud Run
+      - name: Deploy to Cloud Run (safe env var escaping; no PORT)
         shell: bash
         env:
           SERVICE: ${{ secrets.SERVICE_NAME }}
@@ -72,6 +72,8 @@ jobs:
           DB_PASS: ${{ secrets.DB_PASS }}
           DB_NAME: ${{ secrets.DB_NAME }}
           IMAGE_URI: ${{ env.IMAGE_URI }}
+          # Optional: pass your public URL to set siteurl/home automatically
+          WP_URL: ${{ secrets.WP_URL }}
         run: |
           set -euo pipefail
 
@@ -83,13 +85,14 @@ jobs:
           : "${DB_NAME:?missing DB_NAME}"
           : "${IMAGE_URI:?missing IMAGE_URI}"
 
-          # Build one safely-escaped env var string for gcloud
-          printf -v ENV_VARS 'WORDPRESS_DB_HOST=%q,WORDPRESS_DB_USER=%q,WORDPRESS_DB_PASSWORD=%q,WORDPRESS_DB_NAME=%q,PORT=%q' \
-            "/cloudsql/${CONNECTION_NAME}" \
-            "$DB_USER" \
-            "$DB_PASS" \
-            "$DB_NAME" \
-            "8080"
+          # Build a single, safely-escaped env var string (NO PORT here)
+          if [ -n "${WP_URL:-}" ]; then
+            printf -v ENV_VARS 'WORDPRESS_DB_HOST=%q,WORDPRESS_DB_USER=%q,WORDPRESS_DB_PASSWORD=%q,WORDPRESS_DB_NAME=%q,WP_URL=%q' \
+              "/cloudsql/${CONNECTION_NAME}" "$DB_USER" "$DB_PASS" "$DB_NAME" "$WP_URL"
+          else
+            printf -v ENV_VARS 'WORDPRESS_DB_HOST=%q,WORDPRESS_DB_USER=%q,WORDPRESS_DB_PASSWORD=%q,WORDPRESS_DB_NAME=%q' \
+              "/cloudsql/${CONNECTION_NAME}" "$DB_USER" "$DB_PASS" "$DB_NAME"
+          fi
 
           gcloud run deploy "$SERVICE" \
             --image "$IMAGE_URI" \

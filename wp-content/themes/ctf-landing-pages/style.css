@@ -1,0 +1,12 @@
+/*
+Theme Name: CTF Landing Pages
+Theme URI: http://localhost:8080
+Author: CTF
+Description: Minimal theme for local testing in wordpress_site_test
+Version: 0.1.0
+*/
+
+/* Basic reset and minimal styles for test page */
+html, body { margin: 0; padding: 0; }
+body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+

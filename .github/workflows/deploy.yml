@@ -1,9 +1,15 @@
-name: Deploy to Cloud Run
+name: Deploy WordPress to Cloud Run
 
 on:
   push:
-    branches:
-      - main   # Runs when you push to main
+    branches: [ "main" ]   # change if your deploy branch is different
+  workflow_dispatch:       # allow manual runs from the Actions tab
+
+env:
+  # Artifact Registry repo name (will be created if missing)
+  AR_REPO: wordpress
+  # Image name inside the repo
+  IMAGE_NAME: wordpress
 
 jobs:
   deploy:
@@ -13,33 +19,94 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ✅ Authenticate to Google Cloud
+      # ---- AUTHENTICATION ----
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
+          # Add this JSON to GitHub Secrets
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-      # ✅ Install gcloud CLI
-      - name: Set up Google Cloud SDK
+      - name: Install gcloud CLI
         uses: google-github-actions/setup-gcloud@v2
         with:
           project_id: ${{ secrets.GCP_PROJECT_ID }}
           export_default_credentials: true
 
-      - name: Configure Docker for Artifact Registry
+      # ---- ARTIFACT REGISTRY PREP ----
+      - name: Ensure Artifact Registry repository exists
+        run: |
+          set -e
+          if ! gcloud artifacts repositories describe "$AR_REPO" --location="${{ secrets.REGION }}" >/dev/null 2>&1; then
+            echo "Creating Artifact Registry repo: $AR_REPO in ${{ secrets.REGION }}"
+            gcloud artifacts repositories create "$AR_REPO" \
+              --repository-format=docker \
+              --location="${{ secrets.REGION }}" \
+              --description="WordPress images for Cloud Run"
+          else
+            echo "Artifact Registry repo $AR_REPO already exists."
+          fi
+
+      - name: Configure Docker to use Artifact Registry
         run: gcloud auth configure-docker ${{ secrets.REGION }}-docker.pkg.dev --quiet
 
+      # ---- BUILD & PUSH ----
       - name: Build and Push Docker image
         run: |
-          IMAGE=${{ secrets.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/wordpress/wordpress:$(date +%Y%m%d%H%M)
-          docker build -t $IMAGE .
-          docker push $IMAGE
-          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+          set -e
+          IMAGE_URI="${{ secrets.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/$AR_REPO/$IMAGE_NAME:$(date +%Y%m%d-%H%M%S)-${{ github.sha }}"
+          echo "Building $IMAGE_URI"
+          docker build -t "$IMAGE_URI" .
+          docker push "$IMAGE_URI"
+          echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
 
+      # ---- DEPLOY TO CLOUD RUN ----
       - name: Deploy to Cloud Run
         run: |
-          gcloud run deploy ${{ secrets.SERVICE_NAME }} \
-            --image $IMAGE \
-            --region ${{ secrets.REGION }} \
+          set -e
+
+          # Required variables (set in repo Secrets)
+          SERVICE="${{ secrets.SERVICE_NAME }}"
+          REGION="${{ secrets.REGION }}"
+          CONNECTION_NAME="${{ secrets.CLOUDSQL_CONNECTION_NAME }}"
+          DB_USER="${{ secrets.DB_USER }}"
+          DB_PASS="${{ secrets.DB_PASS }}"
+          DB_NAME="${{ secrets.DB_NAME }}"
+
+          # Sanity checks
+          test -n "$SERVICE"
+          test -n "$REGION"
+          test -n "$CONNECTION_NAME"
+          test -n "$DB_USER"
+          test -n "$DB_PASS"
+          test -n "$DB_NAME"
+
+          # Note: WordPress connects via the Cloud SQL Unix socket path in /cloudsql/<connection_name>
+          # Ensure your container listens on the PORT env var (Cloud Run sets PORT=8080).
+          # If you use Apache, your image/entrypoint should honor $PORT.
+
+          gcloud run deploy "$SERVICE" \
+            --image "$IMAGE_URI" \
+            --region "$REGION" \
             --platform managed \
-            --allow-unauthenticated
+            --allow-unauthenticated \
+            --add-cloudsql-instances "$CONNECTION_NAME" \
+            --set-env-vars WORDPRESS_DB_HOST=/cloudsql/$CONNECTION_NAME \
+            --set-env-vars WORDPRESS_DB_USER="$DB_USER" \
+            --set-env-vars WORDPRESS_DB_PASSWORD="$DB_PASS" \
+            --set-env-vars WORDPRESS_DB_NAME="$DB_NAME" \
+            --set-env-vars PORT=8080 \
+            --cpu 1 \
+            --memory 512Mi \
+            --concurrency 80 \
+            --min-instances 0
+
+          # Optional: pin all traffic to latest revision
+          gcloud run services update-traffic "$SERVICE" \
+            --region "$REGION" \
+            --to-latest
+
+      - name: Show Service URL
+        run: |
+          URL=$(gcloud run services describe ${{ secrets.SERVICE_NAME }} --region ${{ secrets.REGION }} --format='value(status.url)')
+          echo "Deployed URL: $URL"
+          echo "SERVICE_URL=$URL" >> $GITHUB_ENV
